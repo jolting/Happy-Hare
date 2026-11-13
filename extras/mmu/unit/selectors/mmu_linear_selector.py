@@ -136,6 +136,7 @@ class LinearSelector(PhysicalSelector):
         super().__init__(config, mmu_unit, params)
 
         self.bypass_offset = -1 # Required for get_status() success during init()
+        self._session_homed = False
 
         self.selector_stepper_name = mmu_unit.config.get('selector_stepper') # Name of selector stepper
         stepper_section = f"mmu_stepper {self.selector_stepper_name}"
@@ -270,6 +271,7 @@ class LinearSelector(PhysicalSelector):
 
     def disable_motors(self):
         self.selector_stepper.do_enable(False)
+        self._session_homed = False
 
         # Assume that if disabling motor then the position will be modified. Clears the persisted
         # gate too so the pair stays correlated -- see _invalidate_persisted_position()
@@ -536,11 +538,22 @@ class LinearSelector(PhysicalSelector):
         self.filament_hold_move()
 
         try:
-            self.selector_stepper.do_home_rail()
+            self.selector_stepper.do_enable(True)
+            self.selector_stepper.do_set_position(0.)
+            self.selector_stepper.do_homing_move(
+                -self.p.cad_gate_width, 5.0, 100.0,
+                probe_pos=False, triggered=False, check_trigger=False)
+            self.selector_stepper.do_set_position(0.)
+            self.selector_stepper.do_homing_move(
+                45.0, 5.0, 100.0,
+                probe_pos=False, triggered=True, check_trigger=True)
+            self.selector_stepper.do_set_position(0.)
             self.is_homed = True
+            self._session_homed = True
             self.var_manager.set(VARS_MMU_SELECTOR_LAST_POS, 0, namespace=self.mmu_unit.name)
 
         except Exception as e:
+            self._session_homed = False
             self._invalidate_persisted_position() # Where the carriage stopped is anyone's guess
             raise MmuError(f"Homing selector failed because of blockage or malfunction. Klipper reports: {e}") from e
 
@@ -549,6 +562,8 @@ class LinearSelector(PhysicalSelector):
         """
         Position gate to desired target position
         """
+        if not self._session_homed:
+            self._home_selector()
         current_pos = self.selector_stepper.commanded_pos
 
         try:

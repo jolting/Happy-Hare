@@ -173,6 +173,7 @@ class MmuController(MmuFilamentMovement):
         self.active_filament = {}
         self.filament_pos = FILAMENT_POS_UNKNOWN
         self.filament_direction = DIRECTION_UNKNOWN
+        self.gate_parked_at_toolhead = [False] * self.num_gates
         self.action = ACTION_IDLE
         self._old_action = None
         self._clear_saved_toolhead_position()
@@ -292,6 +293,12 @@ class MmuController(MmuFilamentMovement):
 
         # Previous filament position
         self.filament_pos = self.var_manager.get(VARS_MMU_FILAMENT_POS, self.filament_pos)
+
+        parked = self.var_manager.get('mmu_gate_parked_at_toolhead', [False] * self.num_gates)
+        if isinstance(parked, list):
+            self.gate_parked_at_toolhead = list(parked)
+        if len(self.gate_parked_at_toolhead) < self.num_gates:
+            self.gate_parked_at_toolhead.extend([False] * (self.num_gates - len(self.gate_parked_at_toolhead)))
 
         if len(errors) > 0:
             self.log_warning("Warning: Some persisted state was ignored because it contained errors:\n%s" % '\n'.join(errors))
@@ -659,6 +666,7 @@ class MmuController(MmuFilamentMovement):
             'filament_position': self.drive().get_filament_position(),
             'filament_pos': self.filament_pos, # State machine position
             'filament_direction': self.filament_direction,
+            'gate_parked_at_toolhead': list(self.gate_parked_at_toolhead),
             'pending_spool_id': self.pending_spool_id,
             'pending_td': self.pending_measurement['td'] if self.pending_measurement else None,
             'tool_extrusion_multipliers': self.tool_extrusion_multipliers,
@@ -864,7 +872,7 @@ class MmuController(MmuFilamentMovement):
         # decides whether the tip has already passed a sensor once homed via a
         # different, further-along endstop. Anything not in this tuple (shouldn't
         # happen) is treated as furthest-along/already passed.
-        GATE_SENSOR_ORDER = (SENSOR_EXIT_PREFIX, SENSOR_SHARED_EXIT, SENSOR_ENCODER, SENSOR_EXTRUDER_ENTRY)
+        GATE_SENSOR_ORDER = (SENSOR_GATE_NONE, SENSOR_EXIT_PREFIX, SENSOR_SHARED_EXIT, SENSOR_ENCODER, SENSOR_EXTRUDER_ENTRY)
 
         # encoder/extruder are shared across a unit's gates (and the encoder is a
         # movement latch, not a presence sensor), so a trigger there says nothing
@@ -2902,6 +2910,12 @@ class MmuController(MmuFilamentMovement):
         self.filament_direction = direction
 
 
+    def set_gate_parked_at_toolhead(self, gate, state):
+        if 0 <= gate < len(self.gate_parked_at_toolhead):
+            self.gate_parked_at_toolhead[gate] = bool(state)
+            self.var_manager.set('mmu_gate_parked_at_toolhead', self.gate_parked_at_toolhead, write=True)
+
+
     def set_filament_pos_state(self, state, silent=False):
         if state in (FILAMENT_POS_UNLOADED, FILAMENT_POS_UNKNOWN):
             self.td1.release()
@@ -2950,7 +2964,11 @@ class MmuController(MmuFilamentMovement):
 
 
     def _gate_homing_string(self):
-        return "ENCODER" if self.mmu_unit().p.gate_homing_endstop == SENSOR_ENCODER else "%s sensor" % self.mmu_unit().p.gate_homing_endstop
+        if self.mmu_unit().p.gate_homing_endstop == SENSOR_ENCODER:
+            return "ENCODER"
+        if self.mmu_unit().p.gate_homing_endstop == SENSOR_GATE_NONE:
+            return "NONE (fixed distance)"
+        return "%s sensor" % self.mmu_unit().p.gate_homing_endstop
 
 
     def _ensure_safe_extruder_temperature(self, source="auto", wait=False):

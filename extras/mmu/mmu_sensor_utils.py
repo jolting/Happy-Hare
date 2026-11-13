@@ -324,6 +324,16 @@ class MmuSensorFactory:
         if self._is_empty_pin(switch_pin):
             return None
 
+        if isinstance(switch_pin, str) and switch_pin.startswith('sensor:'):
+            linked = switch_pin[len('sensor:'):]
+            return MmuLinkedSensor(
+                config=config,
+                name_prefix=name_prefix,
+                gate=gate,
+                linked_name=linked,
+                **kwargs,
+            )
+
         return MmuSwitchSensor(
             config=config,
             name_prefix=name_prefix,
@@ -336,6 +346,8 @@ class MmuSensorFactory:
     def _is_empty_pin(self, switch_pin):
         if switch_pin is None or switch_pin == '':
             return True
+        if isinstance(switch_pin, str) and switch_pin.startswith('sensor:'):
+            return False
 
         ppins = self.printer.lookup_object('pins')
         pin_params = ppins.parse_pin(switch_pin, can_invert=True, can_pullup=True)
@@ -536,6 +548,40 @@ class MmuVirtualEndstopSensor(MmuSensor):
             raise self.printer.command_error("No trigger on %s after full movement" % self.name)
 
         return self._last_trigger_time
+
+
+
+# -----------------------------------------------------------------------------------------------------------
+# Linked sensor wrapper. Connects a virtual MMU sensor to an existing Klipper sensor
+# (e.g. adc_filament_sensor or filament_switch_sensor) by polling its status.
+# -----------------------------------------------------------------------------------------------------------
+
+class MmuLinkedSensor(MmuVirtualEndstopSensor):
+    def __init__(self, config, name_prefix, gate, linked_name, **kwargs):
+        super().__init__(config, name_prefix, gate, **kwargs)
+        self.linked_name = linked_name
+        self.linked_obj = None
+        self.printer.register_event_handler("klippy:connect", self._handle_connect)
+
+    def _handle_connect(self):
+        self.linked_obj = self.printer.lookup_object(f"filament_switch_sensor {self.linked_name}", None)
+        if self.linked_obj is None:
+            self.linked_obj = self.printer.lookup_object(f"adc_filament_sensor {self.linked_name}", None)
+        if self.linked_obj is None:
+            self.linked_obj = self.printer.lookup_object(self.linked_name, None)
+        if self.linked_obj is None:
+            raise self.printer.config_error(f"Cannot find linked sensor: {self.linked_name}")
+        self.printer.get_reactor().register_timer(self._poll_linked, self.printer.get_reactor().NOW)
+
+    def _poll_linked(self, eventtime):
+        if self.linked_obj is not None:
+            st = self.linked_obj.get_status(eventtime)
+            present = st.get('filament_detected', False)
+            self.trigger_handler(eventtime, present)
+        return eventtime + 0.25
+
+    def _endstop_trigger_time(self, eventtime):
+        return self.estimated_print_time(eventtime)
 
 
 

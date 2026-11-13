@@ -84,10 +84,11 @@ class MmuBuffer:
         )
 
         # Setup analog (proportional) sync feedback
-        # Uses single analog input; value scaled in [-1, 1]
+        # Uses single analog input or multiple analog inputs; value scaled in [-1, 1]
+        analog_pins = config.getlist('analog_pins', None)
         analog_pin = config.get('analog_pin', None)
         self.proportional_sensor = None
-        if analog_pin:
+        if analog_pin or analog_pins:
             self.proportional_sensor = MmuProportionalSensor(
                 config,
                 f"{self.name}:{SENSOR_PROPORTIONAL}",
@@ -187,7 +188,15 @@ class MmuProportionalSensor:
         self.tension_vsensor = None
 
         # Config
-        self._pin       = config.get('analog_pin')
+        pins_list       = config.getlist('analog_pins', None)
+        if pins_list:
+            self._pins  = pins_list
+            self._pin   = self._pins[0]
+        else:
+            self._pin   = config.get('analog_pin')
+            self._pins  = [self._pin]
+        self.active_gate = 0
+        self.printer.register_event_handler("mmu:gate_selected", self._handle_gate_selected)
         max_tension     = config.getfloat('analog_max_tension', 1)
         max_compression = config.getfloat('analog_max_compression', 0)
 
@@ -218,6 +227,8 @@ class MmuProportionalSensor:
         # State
         self.value_raw = 0.0 # Raw ADC value
         self.value = 0.0     # In [-1.0, 1.0]
+        self.values_raw = [0.0] * len(self._pins)
+        self.values = [0.0] * len(self._pins)
 
         # Virtual sensor setup
         threshold = self.analog_sensor_threshold
@@ -233,15 +244,15 @@ class MmuProportionalSensor:
 
         # Setup ADC
         ppins = self.printer.lookup_object('pins')
-        self.mcu_adc = ppins.setup_pin('adc', self._pin)
-
-        MmuAdcHelper.setup_adc_compat(
-            self.mcu_adc,
-            self._report_time,
-            self._sample_time,
-            self._sample_count,
-            self._adc_callback,
-        )
+        self.mcu_adcs = [ppins.setup_pin('adc', p) for p in self._pins]
+        for idx, adc in enumerate(self.mcu_adcs):
+            MmuAdcHelper.setup_adc_compat(
+                adc,
+                self._report_time,
+                self._sample_time,
+                self._sample_count,
+                lambda *args, g=idx: self._multi_adc_callback(g, *args)
+            )
 
         self.runout_helper = MmuRunoutHelper(
             self.printer,
@@ -260,10 +271,23 @@ class MmuProportionalSensor:
         # Create virtual tension sensor?
         if virtual_tension_sensor:
             self.tension_vsensor = MmuVirtualEndstopSensor(config, virtual_tension_sensor, None, register=register)
-       
+
         # Expose status
         self.printer.add_object(self.name, self)
         logging.info("MMU: Created Proportional sync-feedback sensor %s]" % self.name)
+
+    def _handle_gate_selected(self, gate, prev_gate):
+        if gate is not None and 0 <= gate < len(self._pins):
+            self.active_gate = gate
+            self.value_raw = self.values_raw[gate]
+            self.value = self.values[gate]
+
+    def _multi_adc_callback(self, gate_idx, *args):
+        read_time, read_value = MmuAdcHelper.unpack_adc_callback(*args)
+        self.values_raw[gate_idx] = float(read_value)
+        self.values[gate_idx] = self._map_reading(read_value)
+        if gate_idx == self.active_gate:
+            self._adc_callback(*args)
 
 
     def _map_reading(self, v_raw):
@@ -355,4 +379,7 @@ class MmuProportionalSensor:
             "enabled":          bool(self.runout_helper.sensor_enabled),
             "value":            self.value,             # in [-1.0, 1.0] (mapped)
             "value_raw":        self.value_raw,         # raw
+            "active_gate":      self.active_gate,
+            "values":           list(self.values),
+            "values_raw":       list(self.values_raw),
         }

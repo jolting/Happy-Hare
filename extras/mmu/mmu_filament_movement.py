@@ -430,6 +430,22 @@ class MmuFilamentMovement:
         self._validate_gate_config(label, profile.endstop)
         self.set_filament_direction(DIRECTION_LOAD)
 
+        if profile.endstop == SENSOR_GATE_NONE:
+            if self.sensor_manager.check_gate_sensor(SENSOR_ENTRY_PREFIX, gate) is False:
+                self.gate_maps.set_gate_status(gate, GATE_EMPTY)
+                self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
+                msg = "Couldn't pick up filament at gate (entry sensor reports empty)"
+                if mark_empty_on_failure:
+                    msg += (f"\nGate marked as empty. Use "
+                            f"'MMU_GATE_MAP GATE={gate} AVAILABLE=1' to reset")
+                    raise MmuError(msg)
+                raise MmuGateHomingMiss(msg)
+            self.gate_maps.set_gate_status(
+                gate, max(self.gate_status[gate], GATE_AVAILABLE))
+            self.set_filament_pos_state(FILAMENT_POS_START_BOWDEN)
+            self.log_trace_exit("_home_to_gate() => (overshoot=0.0)")
+            return 0.0, False
+
         if profile.endstop == SENSOR_ENCODER:
             with self.require_encoder():
                 measured = 0.0
@@ -597,6 +613,15 @@ class MmuFilamentMovement:
 
         self._validate_gate_config(label, profile.endstop)
         self.set_filament_direction(DIRECTION_UNLOAD)
+
+        if profile.endstop == SENSOR_GATE_NONE:
+            move_dist = -extra_homing + profile.parking_distance
+            if move_dist != 0:
+                self.move_filament("Final parking", move_dist)
+            self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
+            homing_movement = -extra_homing
+            self.log_trace_exit(f"_park_from_gate() => (homing_movement={homing_movement})")
+            return homing_movement
 
         if profile.endstop == SENSOR_ENCODER:
 
@@ -791,6 +816,9 @@ class MmuFilamentMovement:
         """
         u = self.mmu_unit()
         ge = u.p.gate_homing_endstop if endstop is None else endstop
+
+        if ge == SENSOR_GATE_NONE:
+            return
 
         if ge == SENSOR_ENCODER:
             if not self.has_encoder():
@@ -1212,6 +1240,15 @@ class MmuFilamentMovement:
 
         self.log_always("Ejecting gate %d..." % gate)
 
+        if u.p.park_at_toolhead and getattr(self, 'gate_parked_at_toolhead', [False]*self.num_gates)[gate]:
+            bowden_length = u.calibrator.get_bowden_length()
+            if bowden_length > 0:
+                self.log_info(f"Unloading bowden tube ({bowden_length:.1f}mm) for gate {gate}...")
+                self._unload_bowden(bowden_length)
+                self._unload_gate()
+            self.set_gate_parked_at_toolhead(gate, False)
+            self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
+
         # First find reliable starting position if we have individual gate exit sensor
         gate_exit_sensor = self.sensor_manager.check_gate_sensor(SENSOR_EXIT_PREFIX, gate)
         if gate_exit_sensor is True:
@@ -1308,7 +1345,7 @@ class MmuFilamentMovement:
 
             self.log_debug("Performing synced pre-unload bowden move of %.1fmm to ensure filament is not trapped in extruder" % length)
 
-            if profile.endstop == SENSOR_ENCODER:
+            if profile.endstop in (SENSOR_ENCODER, SENSOR_GATE_NONE):
                 self.move_filament("Bowden safety pre-unload move", -length, motor="gear+extruder")
                 self.log_info("Slowly unloading bowden because unsure of filament position...")
 
@@ -1856,44 +1893,45 @@ class MmuFilamentMovement:
                 # distance is then relative to the toolhead sensor, not the
                 # extruder gears/entrance.
                 if self.sensor_manager.check_sensor(SENSOR_TOOLHEAD):
-                    raise MmuError(
-                        "Possible toolhead sensor malfunction - filament detected "
-                        "before it entered the extruder."
-                    )
-
-                homing_max = extra_homing + u.p.toolhead_homing_max
-
-                self.log_debug(
-                    f"Homing up to {homing_max:.1f}mm to toolhead sensor"
-                    f"{' (synced)' if synced else ''}"
-                )
-
-                actual, fhomed, measured, _ = self.move_filament(
-                    "Homing to toolhead sensor",
-                    homing_max,
-                    motor=motor,
-                    homing_move=1,
-                    endstop_name=SENSOR_TOOLHEAD,
-                )
-
-                if fhomed:
+                    self.log_debug("Filament already detected at toolhead sensor")
+                    fhomed = True
+                    actual = 0.0
+                    bowden_extra = 0.0
                     self.set_filament_pos_state(FILAMENT_POS_HOMED_TS)
-                    # Bowden part of move is homing distance minus the distance between entrance and toolhead sensor
-                    bowden_extra = max(
-                        actual
-                        - (
-                            u.toolhead_wrapper.p.toolhead_extruder_to_nozzle
-                            - u.toolhead_wrapper.p.toolhead_sensor_to_nozzle
-                        ),
-                        0,
-                    )
                 else:
-                    if self.gate_selected != TOOL_GATE_BYPASS:
-                        self.set_filament_pos_state(FILAMENT_POS_EXTRUDER_ENTRY) # But could also still be POS_IN_BOWDEN!
+                    homing_max = extra_homing + u.p.toolhead_homing_max
+
+                    self.log_debug(
+                        f"Homing up to {homing_max:.1f}mm to toolhead sensor"
+                        f"{' (synced)' if synced else ''}"
+                    )
+
+                    actual, fhomed, measured, _ = self.move_filament(
+                        "Homing to toolhead sensor",
+                        homing_max,
+                        motor=motor,
+                        homing_move=1,
+                        endstop_name=SENSOR_TOOLHEAD,
+                    )
+
+                    if fhomed:
+                        self.set_filament_pos_state(FILAMENT_POS_HOMED_TS)
+                        # Bowden part of move is homing distance minus the distance between entrance and toolhead sensor
+                        bowden_extra = max(
+                            actual
+                            - (
+                                u.toolhead_wrapper.p.toolhead_extruder_to_nozzle
+                                - u.toolhead_wrapper.p.toolhead_sensor_to_nozzle
+                            ),
+                            0,
+                        )
                     else:
-                        # For bypass its best to assume we didn't enter the extruder at all
-                        self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
-                    raise MmuError("Failed to reach toolhead sensor after moving %.1fmm" % actual)
+                        if self.gate_selected != TOOL_GATE_BYPASS:
+                            self.set_filament_pos_state(FILAMENT_POS_EXTRUDER_ENTRY) # But could also still be POS_IN_BOWDEN!
+                        else:
+                            # For bypass its best to assume we didn't enter the extruder at all
+                            self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
+                        raise MmuError("Failed to reach toolhead sensor after moving %.1fmm" % actual)
 
             # Length may be reduced by previous unload in filament cutting use
             # case. Ensure reduction is used only one time.
@@ -2558,10 +2596,14 @@ class MmuFilamentMovement:
                     extruder_homing_buffer = 0.
                     bowden_move_ratio = None
 
-                    if u.require_bowden_move and start_filament_pos < FILAMENT_POS_END_BOWDEN:
+                    is_parked = u.p.park_at_toolhead and getattr(self, 'gate_parked_at_toolhead', [False]*self.num_gates)[self.gate_selected]
+
+                    if u.require_bowden_move and start_filament_pos < FILAMENT_POS_END_BOWDEN and not is_parked:
                         # Homing buffer is the shortfall in desired bowden move
                         bowden_move_ratio, extruder_homing_buffer = self._load_bowden(bowden_move, start_pos=start_overshoot)
                         bowden_travel = bowden_move - extruder_homing_buffer
+                    elif is_parked:
+                        self.log_info(f"Gate {self.gate_selected} already parked in Bowden tube above toolhead")
 
                     if start_filament_pos < FILAMENT_POS_HOMED_EXTRUDER:
                         if must_home:
@@ -2626,6 +2668,8 @@ class MmuFilamentMovement:
                         else:
                             self.wrap_gcode_command(self.p.post_load_macro, exception=True, wait=True)
 
+            if self.filament_pos == FILAMENT_POS_LOADED:
+                self.set_gate_parked_at_toolhead(self.gate_selected, True)
             td1_success = True
 
         except MmuError as ee:
@@ -2750,7 +2794,7 @@ class MmuFilamentMovement:
                 else:
                     self.log_debug("Tip forming performed by slicer, park_pos set to %.1fmm" % park_pos)
 
-            elif do_form_tip == FORM_TIP_STANDALONE and (self.filament_pos >= FILAMENT_POS_IN_EXTRUDER or runout):
+            elif do_form_tip == FORM_TIP_STANDALONE and (self.filament_pos >= FILAMENT_POS_IN_EXTRUDER or (self.filament_pos >= FILAMENT_POS_END_BOWDEN and self.sensor_manager.check_sensor(SENSOR_TOOLHEAD)) or runout):
 
                 with self._wrap_track_time('form_tip'):
                     # Extruder only in runout case to give filament best chance to reach gear
@@ -2817,11 +2861,20 @@ class MmuFilamentMovement:
                     (start_filament_pos >= FILAMENT_POS_END_BOWDEN and calibrated) or
                     (start_filament_pos >= FILAMENT_POS_HOMED_GATE and not full)
                 ):
-                    if u.require_bowden_move:
+                    if u.p.park_at_toolhead:
+                        # Dedicated multi-Bowden unit (AD5X IFS): filament is already parked
+                        # right above the toolhead combiner by _unload_extruder().
+                        self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
+                        self.set_gate_parked_at_toolhead(self.gate_selected, True)
+                        self.log_info(f"Filament parked in Bowden tube {self.gate_selected} above toolhead")
+                        bowden_travel = 0.
+                        bowden_move_ratio = None
+                    elif u.require_bowden_move:
                         # Fast unload of bowden, then unload gate
                         bowden_move_ratio, gate_homing_buffer = self._unload_bowden(bowden_move, ext_unload_overshoot)
                         homing_movement = self._unload_gate(gate_homing_buffer)
                         bowden_travel = bowden_move - gate_homing_buffer - homing_movement
+                        self.set_gate_parked_at_toolhead(self.gate_selected, False)
                     else:
                         # No Bowden stage exists. If unloading the extruder just
                         # reverse-homed off the same sensor used as the gate datum,
@@ -2928,7 +2981,9 @@ class MmuFilamentMovement:
 
         # Pre check to validate the presence of filament in the extruder and case where we don't need to form tip
         filament_initially_present = self.sensor_manager.check_sensor(SENSOR_TOOLHEAD)
-        if filament_initially_present is False:
+        form_macro = self.printer.lookup_object(f"gcode_macro {self._macro_name(self.p.form_tip_macro)}", None)
+        use_cutter = form_macro.variables.get('use_cutter', 0) if form_macro is not None else 0
+        if filament_initially_present is False and not self.has_toolhead_cutter and not use_cutter:
             self.log_debug("Tip forming skipped because no filament was detected")
 
             if self.filament_pos == FILAMENT_POS_LOADED:
