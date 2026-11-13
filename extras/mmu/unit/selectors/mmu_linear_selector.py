@@ -46,6 +46,11 @@ class LinearSelectorParameters(TunableParametersBase):
         ParamSpec('selector_touch_speed',   'float',   60.0, section="SELECTOR", limits=dict(minval=1.0),         guard=_guard_has_selector_touch),
         ParamSpec('selector_touch_enabled', 'int',        1, section="SELECTOR", limits=dict(minval=0, maxval=1), guard=_guard_has_selector_touch),
         ParamSpec('selector_accel',         'float', 1000.0, section="SELECTOR", limits=dict(above=1.0)),
+        # Back off this far before homing (0: home the rail as configured), for a selector whose endstop
+        # may already be triggered at power-on, then home within selector_home_travel; it also homes once
+        # per session before trusting a persisted position
+        ParamSpec('selector_home_backoff',  'float',    0.0, section="SELECTOR", limits=dict(minval=0.0)),
+        ParamSpec('selector_home_travel',   'float',   45.0, section="SELECTOR", limits=dict(above=0.0)),
 
         ParamSpec('cad_gate0_pos',          'float', lambda self: self._cad_default('cad_gate0_pos'),          section="CAD", limits=dict(minval=0.0), hidden=True),
         ParamSpec('cad_gate_width',         'float', lambda self: self._cad_default('cad_gate_width'),         section="CAD", limits=dict(above=0.0),  hidden=True),
@@ -136,6 +141,7 @@ class LinearSelector(PhysicalSelector):
         super().__init__(config, mmu_unit, params)
 
         self.bypass_offset = -1 # Required for get_status() success during init()
+        self._session_homed = False
 
         self.selector_stepper_name = mmu_unit.config.get('selector_stepper') # Name of selector stepper
         stepper_section = f"mmu_stepper {self.selector_stepper_name}"
@@ -270,6 +276,7 @@ class LinearSelector(PhysicalSelector):
 
     def disable_motors(self):
         self.selector_stepper.do_enable(False)
+        self._session_homed = False
 
         # Assume that if disabling motor then the position will be modified. Clears the persisted
         # gate too so the pair stays correlated -- see _invalidate_persisted_position()
@@ -536,11 +543,26 @@ class LinearSelector(PhysicalSelector):
         self.filament_hold_move()
 
         try:
-            self.selector_stepper.do_home_rail()
+            if self.p.selector_home_backoff > 0:
+                speed, accel = self.p.selector_homing_speed, self.p.selector_accel
+                self.selector_stepper.do_enable(True)
+                self.selector_stepper.do_set_position(0.)
+                self.selector_stepper.do_homing_move(
+                    -self.p.selector_home_backoff, speed, accel,
+                    probe_pos=False, triggered=False, check_trigger=False)
+                self.selector_stepper.do_set_position(0.)
+                self.selector_stepper.do_homing_move(
+                    self.p.selector_home_travel, speed, accel,
+                    probe_pos=False, triggered=True, check_trigger=True)
+                self.selector_stepper.do_set_position(0.)
+            else:
+                self.selector_stepper.do_home_rail()
             self.is_homed = True
+            self._session_homed = True
             self.var_manager.set(VARS_MMU_SELECTOR_LAST_POS, 0, namespace=self.mmu_unit.name)
 
         except Exception as e:
+            self._session_homed = False
             self._invalidate_persisted_position() # Where the carriage stopped is anyone's guess
             raise MmuError(f"Homing selector failed because of blockage or malfunction. Klipper reports: {e}") from e
 
@@ -549,6 +571,8 @@ class LinearSelector(PhysicalSelector):
         """
         Position gate to desired target position
         """
+        if self.p.selector_home_backoff > 0 and not self._session_homed:
+            self._home_selector()
         current_pos = self.selector_stepper.commanded_pos
 
         try:
