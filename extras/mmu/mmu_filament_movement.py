@@ -2897,8 +2897,17 @@ class MmuFilamentMovement:
                         u.calibrator.note_unload_telemetry(self.gate_selected, bowden_move, bowden_travel, bowden_move_ratio)
 
                 elif start_filament_pos >= FILAMENT_POS_HOMED_GATE:
-                    # We have to do slow unload because we don't know exactly where we are
-                    self._unload_gate(bowden_move)
+                    if u.p.park_at_toolhead and self.gate_parked_at_toolhead[self.gate_selected]:
+                        # Parked above the toolhead (AD5X IFS) and only the position was
+                        # lost (e.g. a recovery with the toolhead sensor clear): it is
+                        # still parked there. A slow unload over the whole bowden would
+                        # pull it ~bowden_length past its park position.
+                        self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
+                        self.log_info(f"Filament parked in Bowden tube {self.gate_selected} above toolhead")
+                    else:
+                        # We have to do slow unload because we don't know exactly where we are
+                        self._unload_gate(bowden_move)
+                        self.set_gate_parked_at_toolhead(self.gate_selected, False)
 
             # Set future "from buffer" flag (also used for faster loading speed)
             if unload_to_buffer and self.gate_status[self.gate_selected] != GATE_EMPTY:
