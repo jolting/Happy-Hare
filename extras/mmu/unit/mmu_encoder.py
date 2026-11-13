@@ -19,6 +19,7 @@ from ... import pulse_counter
 # Happy Hare imports
 from ..mmu_constants    import *
 from ..mmu_sensor_utils import MmuVirtualEndstopSensor
+from .mmu_analog_counter import MmuAnalogCounter
 
 CHECK_MOVEMENT_TIMEOUT = 0.250
 
@@ -36,7 +37,9 @@ class MmuEncoder:
         self.active_mmu_unit = None
         self.extruder = None
         self.connected_units = [mmu_unit]       # mmu_unit is just the first to load, not necessarily all
-        encoder_pin = config.get('encoder_pin')
+        # An encoder pin, or one analog wheel sensor per gate (analog_pins)
+        analog_pins = config.get('analog_pins', None)
+        encoder_pin = None if analog_pins else config.get('encoder_pin')
 
         # For measurement/counter functionality...
         sample_time = config.getfloat('sample_time', 0.1, above=0.)  # How often Klippy receives accumulated counts
@@ -50,8 +53,12 @@ class MmuEncoder:
         self._last_count_time = None          # Last time counts were received from MCU
         self._counts = self._last_count = 0
         self._movement = False
-        counter = pulse_counter.MCU_counter(self.printer, encoder_pin, sample_time, poll_time)
+        if analog_pins:
+            counter = MmuAnalogCounter(config, mmu_unit)
+        else:
+            counter = pulse_counter.MCU_counter(self.printer, encoder_pin, sample_time, poll_time)
         counter.setup_callback(self._counter_callback)
+        self.counter = counter
 
         # For FlowGuard runout/clog/tangle functionality...
         self.active = False                   # Active only while in a print
@@ -477,5 +484,7 @@ class MmuEncoder:
                 'desired_headroom': round(self.desired_headroom, 1),
                 'detection_mode': self.detection_mode,
                 'enabled': self._flowguard_enabled,
-                'flow_rate': int(round(min(self.extrusion_flowrate, 1.) * 100))
+                'flow_rate': int(round(min(self.extrusion_flowrate, 1.) * 100)),
+                **({'analog': self.counter.get_status(eventtime)}
+                   if isinstance(self.counter, MmuAnalogCounter) else {}),
         }
