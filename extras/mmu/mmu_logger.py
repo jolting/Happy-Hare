@@ -48,7 +48,10 @@ class MmuLogger:
             name = os.path.splitext(os.path.basename(mmu_log))[0]
             self.file_logger = logging.getLogger(name)
 
-            if not any(isinstance(h, QueueHandler) for h in self.file_logger.handlers):
+            # By name, not isinstance: a host that imports this module afresh on a
+            # Klipper restart (Kiln OS loading Happy Hare as a plugin) leaves the last
+            # start's handler, of the old QueueHandler class, on the logger
+            if not any(type(h).__name__ == 'QueueHandler' for h in self.file_logger.handlers):
                 handler = logging.handlers.TimedRotatingFileHandler(
                     mmu_log,
                     when='midnight',
