@@ -167,16 +167,52 @@ class MmuFilamentMovement:
         return OCCUPANCY_PRESENT if entry else OCCUPANCY_EMPTY
 
 
+    PRELOAD_STALL_STEP = 15.0   # mm per feed step while watching the encoder for a stall
+
+    def _feed_until_stalled(self, gate, feed_limit):
+        """
+        Feed the selected gate in PRELOAD_STALL_STEP moves until the encoder measures less than
+        half a step: the strand has stopped against something (on a park_at_toolhead unit, the
+        combiner another gate occupies). A stall only counts once the strand has been seen
+        moving, so an encoder short of the tip doesn't read as one. Returns the distance fed.
+        """
+        step = self.PRELOAD_STALL_STEP
+        fed = 0.
+        seen_moving = False
+        while fed < feed_limit:
+            _, _, measured, _ = self.move_filament(
+                "Preload feed until stall", step, wait=True, encoder_dwell=True)
+            fed += step
+            if measured >= step / 2:
+                seen_moving = True
+            elif seen_moving:
+                self.log_debug("Gate %d stalled after feeding %.1fmm" % (gate, fed))
+                return fed
+        self.gate_maps.set_gate_status(gate, GATE_UNKNOWN)
+        self.set_filament_pos_state(FILAMENT_POS_UNKNOWN)
+        if not seen_moving:
+            raise MmuError("Gate %d: the encoder saw no movement after feeding %.1fmm" % (gate, fed),
+                           hint="Check the gear grips the filament from gate %d" % gate)
+        raise MmuError("Gate %d did not stop at the toolhead within %.1fmm" % (gate, fed),
+                       hint="Check the bowden length for gate %d and that the toolhead path is occupied" % gate)
+
+
     def _preload_to_toolhead_park(self, pending=None):
         """
         Preload the selected gate to where an unload parks it on a park_at_toolhead unit:
         toolhead_unload_safety_margin short of the toolhead sensor, so its next load only
         has to home to that sensor.
 
-        With the toolhead sensor clear, feed until it triggers then back off the margin. The
-        stop is measured, and the distance travelled tunes the bowden length. With another
-        gate loaded the shared sensor already reads filament and cannot see this strand, so
-        make the same trip as a fixed move from the calibrated bowden length instead.
+        The strand is always stopped by the toolhead, never by a feed distance:
+
+          - toolhead sensor clear: feed until it triggers, then back off the margin. The
+            distance travelled tunes the bowden length.
+          - another gate loaded: the shared sensor already reads filament and cannot see this
+            strand, so feed in short steps until the encoder (the IFS motion wheel) shows it
+            has stopped against the occupied combiner, then back off the margin.
+
+        The calibrated bowden length only bounds the feed (plus 20% and the toolhead homing
+        distance); reaching that bound is an error, not a park.
         """
         u = self.mmu_unit()
         gate = self.gate_selected
@@ -191,15 +227,19 @@ class MmuFilamentMovement:
             raise MmuError("No filament detected at the entry sensor of gate %d" % gate)
 
         toolhead_clear = self.sensor_manager.check_sensor(SENSOR_TOOLHEAD) is False
+        # Where the strand starts depends on how far it was pushed in: allow the same 20% that
+        # bowden autotune accepts
+        feed_limit = to_sensor * 1.2 + u.p.toolhead_homing_max
+        if not toolhead_clear and not self.has_encoder():
+            raise MmuError("Cannot preload gate %d while another gate is loaded: without an "
+                           "encoder nothing can tell when it reaches the toolhead" % gate)
         with self.wrap_suspend_filament_monitoring(), self.wrap_suspend_insert_events():
             self.set_filament_direction(DIRECTION_LOAD)
             if toolhead_clear:
                 self.log_always("Preloading gate %d to the toolhead sensor..." % gate)
                 actual, homed, _, _ = self.move_filament(
                     "Preload homing to toolhead sensor",
-                    # Where the strand starts depends on how far it was pushed in: allow the
-                    # same 20% that bowden autotune accepts
-                    to_sensor * 1.2 + u.p.toolhead_homing_max,
+                    feed_limit,
                     homing_move=1,
                     endstop_name=SENSOR_TOOLHEAD,
                 )
@@ -214,8 +254,9 @@ class MmuFilamentMovement:
                 u.calibrator.note_load_telemetry(gate, bowden_length, actual - sensor_offset, None)
                 self.move_filament("Parking above toolhead", -margin)
             else:
-                self.log_always("Preloading gate %d to its park position (toolhead in use)..." % gate)
-                self.move_filament("Fixed move to park above toolhead", to_sensor - margin)
+                self.log_always("Preloading gate %d until it stops at the toolhead..." % gate)
+                self._feed_until_stalled(gate, feed_limit)
+                self.move_filament("Parking above toolhead", -margin)
             self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
 
         self.set_gate_parked_at_toolhead(gate, True)
