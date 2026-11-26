@@ -232,6 +232,10 @@ class MmuFilamentMovement:
         # Where the strand starts depends on how far it was pushed in: allow the same 20% that
         # bowden autotune accepts
         feed_limit = to_sensor * 1.2 + u.p.toolhead_homing_max
+        if self.gate_parked_at_toolhead[gate]:
+            # Already parked: the tip starts the park margin short of the toolhead, so the next
+            # stop is within the toolhead homing distance of that
+            feed_limit = margin + u.p.toolhead_homing_max
         if not toolhead_clear and not self.has_encoder():
             raise MmuError("Cannot preload gate %d while another gate is loaded: without an "
                            "encoder nothing can tell when it reaches the toolhead" % gate)
