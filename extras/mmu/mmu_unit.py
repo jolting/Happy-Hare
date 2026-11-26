@@ -526,6 +526,7 @@ class MmuUnit:
         else:
             logging.info("MMU: - No mmu_encoder specified")
             self.calibrator.mark_calibrated(CALIBRATED_ENCODER)
+        self._check_encoder_capabilities(config)
 
         # Load optional sync-feedback mmu_buffer (can be a shared buffer so check for existence first)
         self.buffer = None
@@ -758,6 +759,27 @@ class MmuUnit:
 
     def has_encoder(self):
         return self.encoder is not None
+
+
+    # Uses of the encoder that its counter backend can't support, refused at config time so a
+    # hand-written config fails clearly instead of misbehaving mid-load
+    ENCODER_HOMING_PARAMS = ('gate_homing_endstop', 'gate_preload_endstop', 'extruder_homing_endstop')
+
+    def _check_encoder_capabilities(self, config):
+        encoder = self.encoder
+        if encoder is None:
+            return
+        if not encoder.supports_homing():
+            for name in self.ENCODER_HOMING_PARAMS:
+                if getattr(self.p, name) == SENSOR_ENCODER:
+                    raise config.error(
+                        "[%s] %s: %s needs an encoder that can stop a move, and [mmu_encoder %s] "
+                        "is analog (its counts arrive after the move). Choose another endstop"
+                        % (config.get_name(), name, SENSOR_ENCODER, encoder.name))
+        if not encoder.supports_move_validation() and self.p.encoder_move_validation:
+            logging.warning(
+                "MMU: [%s] encoder_move_validation is ignored: [mmu_encoder %s] is analog and "
+                "can't check a move as soon as it completes" % (config.get_name(), encoder.name))
 
     def has_espooler(self):
         return self.espooler is not None

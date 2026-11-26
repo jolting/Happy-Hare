@@ -792,7 +792,8 @@ class MmuController(MmuFilamentMovement):
 
 
     def can_use_encoder(self, gate=None):
-        return self.has_encoder(gate) and self.mmu_unit(gate).p.encoder_move_validation
+        return (self.has_encoder(gate) and self.mmu_unit(gate).p.encoder_move_validation
+                and self.encoder(gate).supports_move_validation())
 
 
 
@@ -3076,6 +3077,9 @@ class MmuController(MmuFilamentMovement):
             self.movequeue_wait()
         elif dwell is False:
             self.movequeue_wait()
+        if dwell is not None and self.has_encoder():
+            # An analog encoder's counts lag the movement: wait until they have all arrived
+            self.encoder().wait_for_counts()
 
 
     def initialize_encoder(self, dwell=False):

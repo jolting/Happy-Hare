@@ -52,7 +52,20 @@ class MmuUnitParameters(TunableParametersBase):
     def _guard_has_flowguard(self):
         return self._guard_has_encoder or self._guard_has_buffer
 
+    def _reject_encoder_homing(self, name, value):
+        # At config time the encoder isn't attached yet; MmuUnit._check_encoder_capabilities
+        # checks the configured values once it is. This covers runtime changes
+        encoder = getattr(self._mmu_unit, 'encoder', None)
+        if value == SENSOR_ENCODER and encoder is not None and not encoder.supports_homing():
+            raise ValueError(
+                "%s '%s' needs an encoder that can stop a move, and encoder '%s' is analog"
+                % (name, value, encoder.name))
+
+    def _validate_extruder_homing_endstop(self, value):
+        self._reject_encoder_homing('extruder_homing_endstop', value)
+
     def _validate_gate_homing_endstop(self, value):
+        self._reject_encoder_homing('gate_homing_endstop', value)
         if value == SENSOR_EXTRUDER_ENTRY and self._mmu_unit.require_bowden_move:
             raise ValueError(
                 "gate_homing_endstop '%s' requires require_bowden_move to be 0"
@@ -63,6 +76,7 @@ class MmuUnitParameters(TunableParametersBase):
                 % (SENSOR_EXTRUDER_ENTRY, value))
 
     def _validate_gate_preload_endstop(self, value):
+        self._reject_encoder_homing('gate_preload_endstop', value)
         # On a no-bowden unit mmu_shared_exit is only an alias for the extruder sensor, and
         # only within the per-gate sensor map. _shared_gate_path_occupied() resolves against
         # the global registry and so cannot see it, leaving that guard silently dead. Same
@@ -356,7 +370,7 @@ class MmuUnitParameters(TunableParametersBase):
 
         # Extruder/Toolhead
         ParamSpec('extruder_force_homing',            'int',       0, section="EXTRUDER MOVE", limits=dict(minval=0, maxval=1)),
-        ParamSpec('extruder_homing_endstop',          'choice', SENSOR_EXTRUDER_NONE, section="EXTRUDER MOVE", choices={o: o for o in EXTRUDER_ENDSTOPS}),
+        ParamSpec('extruder_homing_endstop',          'choice', SENSOR_EXTRUDER_NONE, section="EXTRUDER MOVE", choices={o: o for o in EXTRUDER_ENDSTOPS}, validator=_validate_extruder_homing_endstop),
         ParamSpec('extruder_homing_max',              'float',  50.0, section="EXTRUDER MOVE", limits=dict(above=10.0)),
         ParamSpec('extruder_collision_homing_step',   'int',       3, section="EXTRUDER MOVE", limits=dict(minval=2, maxval=5), guard=_guard_has_encoder),
         ParamSpec('toolhead_homing_max',              'float',  20.0, section="EXTRUDER MOVE", limits=dict(minval=0.0),         guard=_guard_has_sensor(SENSOR_TOOLHEAD)),

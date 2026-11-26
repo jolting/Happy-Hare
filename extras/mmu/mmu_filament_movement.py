@@ -806,6 +806,11 @@ class MmuFilamentMovement:
                     f"Attempting to {direction} using encoder but encoder is not "
                     f"configured or is disabled"
                 )
+            if not self.encoder().supports_homing():
+                raise MmuError(
+                    f"Attempting to {direction} using encoder '{self.encoder().name}', which is "
+                    f"analog and can't stop a move. Choose another gate endstop"
+                )
 
         elif ge in GATE_ENDSTOPS:
             endstop_name = self.sensor_manager.get_qualified_endstop_name(ge)
@@ -1708,6 +1713,11 @@ class MmuFilamentMovement:
             homed = True
 
         elif u.p.extruder_homing_endstop == SENSOR_EXTRUDER_ENCODER:
+            if self.has_encoder() and not self.encoder().supports_homing():
+                raise MmuError(
+                    f"Cannot home to extruder using 'collision' method because encoder "
+                    f"'{self.encoder().name}' is analog and can't stop a move"
+                )
             if self.has_encoder():
                 homing_movement, homed, measured, _ = self._home_to_extruder_collision_detection(homing_max)
             else:
