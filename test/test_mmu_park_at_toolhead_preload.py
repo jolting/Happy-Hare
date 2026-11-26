@@ -129,6 +129,21 @@ class ParkAtToolheadPreloadTestCase(unittest.TestCase):
         self.assertEqual(self.hh.errors, [])
         self.assertAlmostEqual(self.fil.tip[2], self.combiner - self.margin, places=1)
 
+    def test_a_parked_gate_feeds_at_most_the_margin_and_homing_distance(self):
+        """Already parked, it starts near the toolhead: no bowden-length feed past a missed stop."""
+        self.load_gate(0)
+        self.hh.place_filament(2, position=TIP_AT_GATE)
+        self.hh.run_gcode('MMU_PRELOAD GATE=2')
+        self.assertTrue(self.mmu.gate_parked_at_toolhead[2])
+        self.combiner = 1e9     # the stop is missed this time
+        start = self.fil.tip[2]
+
+        self.hh.run_gcode('MMU_PRELOAD GATE=2')
+
+        self.assertTrue(any('did not stop at the toolhead' in e for e in self.hh.errors), self.hh.errors)
+        limit = self.margin + self.unit.p.toolhead_homing_max
+        self.assertLessEqual(self.fil.tip[2] - start, limit + self.mmu.PRELOAD_STALL_STEP)
+
     def test_no_stall_within_the_feed_limit_is_an_error_not_a_park(self):
         self.load_gate(0)
         self.combiner = 1e9     # nothing in the way
