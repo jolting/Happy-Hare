@@ -17,6 +17,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
+import math
 import unittest
 
 from test.hh import install
@@ -53,7 +54,10 @@ class FakeConfig:
         return self._options.get(option, default)
 
     def getfloat(self, option, default=None, minval=None, maxval=None, above=None, below=None):
-        value = float(self._options.get(option, default))
+        value = self._options.get(option, default)
+        if value is None:
+            return None
+        value = float(value)
         if below is not None and value >= below:
             raise ConfigError('%s must be below %s' % (option, below))
         return value
@@ -272,6 +276,136 @@ class TestSetup(CounterTestCase):
         self.assertEqual(status['value'], WHEEL[-1])
 
 
+def sine(x, period=10.6, mid=0.67, amp=0.165):
+    """The wheel's reading at x mm of travel, as a sine."""
+    return mid + amp * math.sin(2 * math.pi * x / period)
+
+
+def travel(start, end, step=0.1):
+    """Positions from start to end (exclusive) in steps of `step` mm, either direction."""
+    n = int(round(abs(end - start) / step))
+    d = step if end > start else -step
+    return [start + d * i for i in range(1, n + 1)]
+
+
+class TestInterpolation(CounterTestCase):
+    """analog_interpolate: fractions of a pulse from where the reading is in the cycle."""
+
+    PERIOD = 10.6       # mm per wheel cycle: two pulses
+    SEEDED = dict(analog_interpolate='1', analog_min='0.505', analog_max='0.835')
+
+    def pulses(self, mm):
+        return 2 * mm / self.PERIOD
+
+    def run_to(self, xs, noise=0., rng=None):
+        self.feed([sine(x, self.PERIOD) + (rng.gauss(0, noise) if rng else 0.) for x in xs], batch=1)
+
+    def test_off_by_default_reports_whole_pulses(self):
+        self.make()
+        self.run_to(travel(0, 30))
+        self.assertFalse(self.counter.interpolate)
+        self.assertEqual(self.reports[-1][1], self.counter.count)
+        self.assertIsInstance(self.reports[-1][1], int)
+
+    def test_distance_matches_the_travel(self):
+        self.make(**self.SEEDED)
+        self.run_to(travel(0, 2.0))     # settle on the cycle
+        start = self.counter.position
+        self.run_to(travel(2.0, 32.0))
+        self.assertAlmostEqual(self.counter.position - start, self.pulses(30.0), delta=0.1)
+
+    def test_fractions_of_a_pulse_are_counted(self):
+        """A pulse is 5.3mm; about a millimetre on the slope is seen."""
+        self.make(**self.SEEDED)
+        self.run_to(travel(0, 1.0))
+        for start in (1.0, 4.8, 9.6, 14.6):     # on the slopes, away from the peak and trough
+            before = self.counter.position
+            self.run_to(travel(start, start + 1.0))
+            self.assertAlmostEqual(self.counter.position - before, self.pulses(1.0), delta=0.08, msg=start)
+            nxt = {1.0: 4.8, 4.8: 9.6, 9.6: 14.6, 14.6: 15.0}[start]
+            self.run_to(travel(start + 1.0, nxt))
+
+    def test_reported_count_carries_the_fraction(self):
+        self.make(**self.SEEDED)
+        self.run_to(travel(0, 4.0))
+        self.assertNotEqual(self.reports[-1][1], int(self.reports[-1][1]))
+        self.assertAlmostEqual(self.reports[-1][1], self.counter.position)
+
+    def test_standing_noise_counts_nothing(self):
+        import random
+        rng = random.Random(1)
+        self.make(**self.SEEDED)
+        self.run_to(travel(0, 1.0))
+        here = 1.0
+        for x in (2.65, 5.3, 7.95, 10.6):       # peak, falling slope, trough, rising slope
+            self.run_to(travel(here, x))        # gets there as a filament does: continuously
+            here = x
+            before = self.counter.position
+            self.run_to([x] * 1500, noise=0.0013, rng=rng)
+            self.assertLess(self.counter.position - before, 0.05, x)
+
+    def test_through_peaks_and_troughs_nothing_is_lost(self):
+        self.make(**self.SEEDED)
+        self.run_to(travel(0, 1.0))
+        before = self.counter.position
+        self.run_to(travel(1.0, 1.0 + 5 * self.PERIOD))
+        self.assertAlmostEqual(self.counter.position - before, 10.0, delta=0.15)
+
+    def test_a_reversal_between_moves_counts_both_ways(self):
+        """Direction-blind, like a pulse counter: 8mm out and 3mm back is 11mm."""
+        self.make(**self.SEEDED)
+        self.run_to(travel(0, 1.0))
+        before = self.counter.position
+        self.run_to(travel(1.0, 9.0))
+        self.run_to([9.0] * 20)                 # stands between the moves
+        self.run_to(travel(9.0, 6.0))
+        self.assertAlmostEqual(self.counter.position - before, self.pulses(11.0), delta=0.25)
+
+    def test_the_extremes_are_learned_without_seeds(self):
+        self.make(analog_interpolate='1')
+        self.assertFalse(self.counter.interpolating())
+        self.run_to(travel(0, 2 * self.PERIOD))
+        self.assertTrue(self.counter.interpolating())
+        self.assertAlmostEqual(self.counter.peak, 0.835, delta=0.01)
+        self.assertAlmostEqual(self.counter.trough, 0.505, delta=0.01)
+        before = self.counter.position
+        self.run_to(travel(2 * self.PERIOD, 2 * self.PERIOD + 20.0))
+        self.assertAlmostEqual(self.counter.position - before, self.pulses(20.0), delta=0.15)
+
+    def test_until_learned_a_pulse_is_a_whole_pulse(self):
+        self.make(analog_interpolate='1')
+        self.run_to(travel(0, 6.0))
+        self.assertEqual(self.counter.position, self.counter.count)
+
+    def test_min_must_be_below_max(self):
+        with self.assertRaises(ConfigError):
+            self.make(analog_interpolate='1', analog_min='0.8', analog_max='0.5')
+
+    def test_the_measured_ifs_trace(self):
+        """A real AD5X IFS wheel, 30mm back and 30mm forward at 5mm/s: the interpolated distance
+        agrees with the pulses over each move, and nothing is added while it stands."""
+        import csv, os
+        path = os.path.join(os.path.dirname(__file__), 'support', 'ifs_wheel_trace.csv')
+        with open(path) as f:
+            rows = list(csv.DictReader(line for line in f if not line.startswith('#')))
+        self.make(**self.SEEDED)
+        segments = []
+        for r in rows:
+            if not segments or segments[-1][0] != r['phase']:
+                segments.append([r['phase'], []])
+            segments[-1][1].append(float(r['value']))
+        moves = []
+        for phase, values in segments:
+            p0, c0 = self.counter.position, self.counter.count
+            self.feed(values, batch=8)
+            if phase == 'move':
+                moves.append((self.counter.position - p0, self.counter.count - c0))
+        self.assertEqual(len(moves), 2)
+        for fine, pulses in moves:
+            self.assertAlmostEqual(fine, pulses, delta=1.2)
+        self.assertGreater(moves[1][0], 5.0)        # ~30mm at ~5.3mm per pulse
+
+
 class TestInstaller(unittest.TestCase):
     """menuconfig's 'Analog sensor' encoder type."""
 
@@ -426,6 +560,53 @@ class TestMachine(unittest.TestCase):
         self.encoder.wait_for_counts()
         self.assertLessEqual(reactor.monotonic() - start,
                              self.encoder.report_latency() + 0.5 + self.encoder.counter.report_time + 1e-6)
+
+
+class TestInterpolatingMachine(unittest.TestCase):
+    """analog_interpolate through the real MmuEncoder: fractional distance end to end."""
+
+    def setUp(self):
+        from test.hh import session
+
+        def edit(fc):
+            for k, v in (('analog_interpolate', '1'), ('analog_min', '0.505'), ('analog_max', '0.835'),
+                         ('encoder_resolution', '5.3')):
+                fc.set('mmu_encoder unit0', k, v)
+        self.hh = session('encoder_analog', config_edit=edit)
+        self.addCleanup(self.hh.close)
+        self.hh.boot()
+        self.assertEqual(self.hh.errors, [], 'bootup was not clean')
+        self.encoder = self.hh.mmu.mmu_unit(0).encoder
+        self.t = 100.
+
+    def run_to(self, xs):
+        adc = self.encoder.counter.mcu_adc
+        for x in xs:
+            self.t += 0.02
+            adc.feed(sine(x), read_time=self.t)
+
+    def test_distance_has_fractions_of_a_pulse(self):
+        self.assertTrue(self.encoder.counts_fractions())
+        self.run_to(travel(0, 1.0))
+        start = self.encoder.get_distance()
+        self.run_to(travel(1.0, 3.5))
+        self.assertAlmostEqual(self.encoder.get_distance() - start, 2.5, delta=0.3)
+
+    def test_set_distance_keeps_the_fraction(self):
+        self.encoder.set_distance(7.3)
+        self.assertAlmostEqual(self.encoder.get_distance(), 7.3)
+
+    def test_min_measurable(self):
+        # analog_min/analog_max seed the extremes, so fractions count from the start
+        self.assertAlmostEqual(self.encoder.min_measurable(), 0.53)
+        self.encoder.counter.peak = None                          # as if not seeded nor learned
+        self.assertEqual(self.encoder.min_measurable(), 5.3)
+        self.assertIn('position', self.encoder.get_status(0.)['analog'])
+
+    def test_still_no_homing_or_move_validation(self):
+        """Fractions don't change the latency: the capabilities are the same."""
+        self.assertFalse(self.encoder.supports_homing())
+        self.assertFalse(self.encoder.supports_move_validation())
 
 
 class TestHandWrittenConfig(unittest.TestCase):

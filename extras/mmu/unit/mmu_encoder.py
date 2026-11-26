@@ -141,6 +141,18 @@ class MmuEncoder:
         return not self.is_analog()
 
 
+    def counts_fractions(self):
+        """Counts fractions of a pulse (an interpolating analog input)."""
+        return self.is_analog() and self.counter.interpolate
+
+
+    def min_measurable(self):
+        """Smallest movement (mm) this encoder reliably reports."""
+        if self.counts_fractions() and self.counter.interpolating():
+            return 0.1 * self.resolution
+        return self.resolution
+
+
     def report_latency(self):
         """Longest time (s) between a movement and its counts reaching the host."""
         if self.is_analog():
@@ -489,7 +501,10 @@ class MmuEncoder:
 
 
     def set_distance(self, new_distance):
-        self._counts = int(round(new_distance / self.resolution))
+        if self.counts_fractions():
+            self._counts = new_distance / self.resolution
+        else:
+            self._counts = int(round(new_distance / self.resolution))
 
 
     def get_distance(self):
