@@ -53,6 +53,9 @@ class MmuSensorManager:
                 (sf_buffer.tension_sensor if sf_buffer else None, SENSOR_TENSION, sf_buffer_name),
                 (sf_buffer.proportional_sensor if sf_buffer else None, SENSOR_PROPORTIONAL, sf_buffer_name),
                 (encoder.endstop_sensor if encoder else None, SENSOR_ENCODER, encoder_name),
+            ] + [
+                # Every encoder of a unit with one per gate, each under its own name
+                (e.endstop_sensor, SENSOR_ENCODER, e.name) for e in mmu_unit.encoders if e is not encoder
             ]
 
             unit_sensors = collect_sensors([
@@ -86,7 +89,7 @@ class MmuSensorManager:
                     (sf_buffer and mmu_unit.buffer.compression_sensor, SENSOR_COMPRESSION),
                     (sf_buffer and mmu_unit.buffer.tension_sensor, SENSOR_TENSION),
                     (sf_buffer and mmu_unit.buffer.proportional_sensor, SENSOR_PROPORTIONAL),
-                    (encoder and mmu_unit.encoder.endstop_sensor, SENSOR_ENCODER),
+                    (encoder and mmu_unit.encoder_for(gate).endstop_sensor, SENSOR_ENCODER),
                     (mmu_unit.sensors.shared_exit_sensor, SENSOR_SHARED_EXIT),
                 ])
                 gate_sensors.update(unit_toolhead_sensors)
@@ -380,7 +383,7 @@ class MmuSensorManager:
 
             # Encoder-based sensors (encoder is optional, may not be fitted)
             if generic in [SENSOR_ENCODER]:
-                if mmu_unit.encoder and prefix == mmu_unit.encoder.name:
+                if any(prefix == e.name for e in mmu_unit.encoders):
                     return generic
 
             # Toolhead-based sensors
