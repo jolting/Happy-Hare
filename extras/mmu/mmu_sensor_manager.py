@@ -45,7 +45,8 @@ class MmuSensorManager:
 
             sf_buffer = mmu_unit.buffer
             sf_buffer_name = sf_buffer.name if sf_buffer is not None else None
-            encoder = mmu_unit.encoder
+            # The unit's first encoder (not unit.encoder, which follows the selected gate)
+            encoder = mmu_unit.encoders[0] if mmu_unit.encoders else None
             encoder_name = encoder.name if encoder is not None else None
             sensor_defs = [
                 (mmu_unit.sensors.shared_exit_sensor, SENSOR_SHARED_EXIT, mmu_unit.name),
@@ -53,10 +54,11 @@ class MmuSensorManager:
                 (sf_buffer.tension_sensor if sf_buffer else None, SENSOR_TENSION, sf_buffer_name),
                 (sf_buffer.proportional_sensor if sf_buffer else None, SENSOR_PROPORTIONAL, sf_buffer_name),
                 (encoder.endstop_sensor if encoder else None, SENSOR_ENCODER, encoder_name),
-            ] + [
-                # Every encoder of a unit with one per gate, each under its own name
-                (e.endstop_sensor, SENSOR_ENCODER, e.name) for e in mmu_unit.encoders if e is not encoder
             ]
+            # The other encoders of a unit with one per gate: only under their own names, so
+            # they don't replace the unit's 'encoder'
+            other_encoders = [(e.endstop_sensor, SENSOR_ENCODER, e.name)
+                              for e in mmu_unit.encoders if e is not encoder]
 
             unit_sensors = collect_sensors([
                 (sensor, sensor_type)
@@ -65,7 +67,7 @@ class MmuSensorManager:
 
             prefixed_unit_sensors = collect_sensors([
                 (sensor, self.get_prefixed_sensor_name(sensor_type, name)) if sensor and name else (sensor, None)
-                for sensor, sensor_type, name in sensor_defs
+                for sensor, sensor_type, name in sensor_defs + other_encoders
             ])
 
             unit_toolhead_sensors = collect_sensors([

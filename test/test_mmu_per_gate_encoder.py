@@ -87,6 +87,11 @@ class TestMapping(PerGateTestCase):
         self.hh.filament().advance(2, 30.0, 'user pulls on gate 2')
         self.assertEqual(self.mmu.encoder().get_distance(), before)
 
+    def test_the_unit_level_encoder_sensor_is_the_first_wheel(self):
+        """The extra wheels are only added under their own names, not over the unit's 'encoder'."""
+        unit_map = self.mmu.sensor_manager.unit_sensors[0]
+        self.assertIs(unit_map['encoder'], self.enc[0].endstop_sensor)
+
     def test_each_encoder_has_its_endstop_sensor(self):
         for g in GATES:
             self.assertIsNotNone(self.hh.sensor('%s:encoder' % NAMES[g]))
