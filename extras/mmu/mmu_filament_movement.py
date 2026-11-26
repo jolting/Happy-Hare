@@ -170,13 +170,19 @@ class MmuFilamentMovement:
 
 
     PRELOAD_STALL_STEP = 15.0   # mm per feed step while watching the encoder for a stall
+    PRELOAD_START_STEPS = 2     # steps without movement before giving up at the start
 
-    def _feed_until_stalled(self, gate, feed_limit):
+    def _feed_until_stalled(self, gate, feed_limit, at_stop_ok=False):
         """
         Feed the selected gate in PRELOAD_STALL_STEP moves until the encoder measures less than
         half a step: the strand has stopped against something (on a park_at_toolhead unit, the
-        combiner another gate occupies). A stall only counts once the strand has been seen
-        moving, so an encoder short of the tip doesn't read as one. Returns the distance fed.
+        combiner another gate occupies). Returns the distance fed.
+
+        A stall only counts once the strand has been seen moving, so a fresh strand whose tip
+        hasn't reached the encoder yet doesn't read as one. But with at_stop_ok (the gate is
+        parked: its tip is past the encoder and near the stop) no movement in the first
+        PRELOAD_START_STEPS steps means it is already at the stop, and that is the stall,
+        rather than grinding on.
         """
         step = self.PRELOAD_STALL_STEP
         fed = 0.
@@ -189,6 +195,9 @@ class MmuFilamentMovement:
                 seen_moving = True
             elif seen_moving:
                 self.log_debug("Gate %d stalled after feeding %.1fmm" % (gate, fed))
+                return fed
+            elif at_stop_ok and fed >= step * self.PRELOAD_START_STEPS:
+                self.log_debug("Gate %d was already at the stop (no movement in %.1fmm)" % (gate, fed))
                 return fed
         self.gate_maps.set_gate_status(gate, GATE_UNKNOWN)
         self.set_filament_pos_state(FILAMENT_POS_UNKNOWN)
@@ -232,7 +241,8 @@ class MmuFilamentMovement:
         # Where the strand starts depends on how far it was pushed in: allow the same 20% that
         # bowden autotune accepts
         feed_limit = to_sensor * 1.2 + u.p.toolhead_homing_max
-        if self.gate_parked_at_toolhead[gate]:
+        parked = self.gate_parked_at_toolhead[gate]
+        if parked:
             # Already parked: the tip starts the park margin short of the toolhead, so the next
             # stop is within the toolhead homing distance of that
             feed_limit = margin + u.p.toolhead_homing_max
@@ -261,7 +271,7 @@ class MmuFilamentMovement:
                 self.move_filament("Parking above toolhead", -margin)
             else:
                 self.log_always("Preloading gate %d until it stops at the toolhead..." % gate)
-                self._feed_until_stalled(gate, feed_limit)
+                self._feed_until_stalled(gate, feed_limit, at_stop_ok=parked)
                 self.move_filament("Parking above toolhead", -margin)
             self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
 
