@@ -832,6 +832,9 @@ class MmuUnit:
         selector can't move with filament loaded, so it crossloads in place: other gates must
         home to their own exit sensor and park behind it, short of the selector.
         """
+        if self.p.park_at_toolhead:
+            # One bowden per gate up to the toolhead combiner: other gates park short of it
+            return True
         if self.selector_type == SELECTOR_LINEAR_MULTI_GEAR:
             return (
                 self.p.gate_preload_endstop == SENSOR_EXIT_PREFIX

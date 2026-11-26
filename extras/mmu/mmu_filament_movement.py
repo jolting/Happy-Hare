@@ -167,6 +167,64 @@ class MmuFilamentMovement:
         return OCCUPANCY_PRESENT if entry else OCCUPANCY_EMPTY
 
 
+    def _preload_to_toolhead_park(self, pending=None):
+        """
+        Preload the selected gate to where an unload parks it on a park_at_toolhead unit:
+        toolhead_unload_safety_margin short of the toolhead sensor, so its next load only
+        has to home to that sensor.
+
+        With the toolhead sensor clear, feed until it triggers then back off the margin. The
+        stop is measured, and the distance travelled tunes the bowden length. With another
+        gate loaded the shared sensor already reads filament and cannot see this strand, so
+        make the same trip as a fixed move from the calibrated bowden length instead.
+        """
+        u = self.mmu_unit()
+        gate = self.gate_selected
+        th = u.toolhead_wrapper.p
+        sensor_offset = th.toolhead_extruder_to_nozzle - th.toolhead_sensor_to_nozzle
+        bowden_length = u.calibrator.get_bowden_length()
+        to_sensor = bowden_length + sensor_offset
+        margin = u.p.toolhead_unload_safety_margin
+
+        if self.sensor_manager.check_gate_sensor(SENSOR_ENTRY_PREFIX, gate) is False:
+            self.gate_maps.set_gate_status(gate, GATE_EMPTY)
+            raise MmuError("No filament detected at the entry sensor of gate %d" % gate)
+
+        toolhead_clear = self.sensor_manager.check_sensor(SENSOR_TOOLHEAD) is False
+        with self.wrap_suspend_filament_monitoring(), self.wrap_suspend_insert_events():
+            self.set_filament_direction(DIRECTION_LOAD)
+            if toolhead_clear:
+                self.log_always("Preloading gate %d to the toolhead sensor..." % gate)
+                actual, homed, _, _ = self.move_filament(
+                    "Preload homing to toolhead sensor",
+                    # Where the strand starts depends on how far it was pushed in: allow the
+                    # same 20% that bowden autotune accepts
+                    to_sensor * 1.2 + u.p.toolhead_homing_max,
+                    homing_move=1,
+                    endstop_name=SENSOR_TOOLHEAD,
+                )
+                if not homed:
+                    self.gate_maps.set_gate_status(gate, GATE_UNKNOWN)
+                    self.set_filament_pos_state(FILAMENT_POS_UNKNOWN)
+                    raise MmuError(
+                        "Filament from gate %d did not reach the toolhead sensor after moving %.1fmm"
+                        % (gate, actual),
+                        hint="Check the gate's bowden is clear, then MMU_RECOVER and MMU_PRELOAD GATE=%d" % gate
+                    )
+                u.calibrator.note_load_telemetry(gate, bowden_length, actual - sensor_offset, None)
+                self.move_filament("Parking above toolhead", -margin)
+            else:
+                self.log_always("Preloading gate %d to its park position (toolhead in use)..." % gate)
+                self.move_filament("Fixed move to park above toolhead", to_sensor - margin)
+            self.set_filament_pos_state(FILAMENT_POS_UNLOADED)
+
+        self.set_gate_parked_at_toolhead(gate, True)
+        self.gate_maps.set_gate_status(gate, GATE_AVAILABLE)
+        self.last_preloaded_gate = gate
+        self._check_pending_filament(gate, pending=pending)
+        self.log_always("Gate %d preloaded and parked above the toolhead" % gate)
+
+
     def _preload_gate(self, pending=None):
         """
         Preload filament at the selected gate, working entirely from the preload parameter
@@ -196,6 +254,13 @@ class MmuFilamentMovement:
                     # Ensure expected sync/grip state before macro
                     self.reset_sync_gear_to_extruder(False, force_grip=True)
                     self.wrap_gcode_command(self.p.post_preload_macro, exception=True, wait=True)
+
+        # park_at_toolhead (one bowden per gate up to a toolhead combiner, e.g. the AD5X IFS):
+        # preload to the gate's park position above the toolhead, not to a gate endstop
+        if self.mmu_unit().p.park_at_toolhead and self.sensor_manager.has_sensor(SENSOR_TOOLHEAD):
+            self._preload_to_toolhead_park(pending=pending)
+            run_post_preload_macro()
+            return
 
         # Explicitly sensorless preload is an open-loop operation. Keep it separate from the
         # established homing/NFC path below: there is no datum to validate, retry, scan from,
