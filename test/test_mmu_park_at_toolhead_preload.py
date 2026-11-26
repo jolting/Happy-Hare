@@ -128,6 +128,17 @@ class ParkAtToolheadPreloadTestCase(unittest.TestCase):
         moved = sum(d for g, d, _r in self.fil.history if g == 1 and d > 0)
         self.assertLess(moved, self.margin + self.unit.p.toolhead_homing_max + 100, self.fil.history)
 
+    def test_pulling_a_parked_strand_out_clears_its_parked_flag(self):
+        self.hh.place_filament(1, position=TIP_AT_GATE)
+        self.hh.run_gcode('MMU_PRELOAD GATE=1')
+        self.assertTrue(self.mmu.gate_parked_at_toolhead[1])
+
+        self.hh.place_filament(1, position=-100000.0, quiet=False)
+        self.hh.settle()
+
+        self.assertEqual(self.mmu.gate_status[1], GATE_EMPTY)
+        self.assertFalse(self.mmu.gate_parked_at_toolhead[1])
+
     def test_empty_gate_is_refused(self):
         self.hh.place_filament(1, position=-100000.0)
         self.hh.run_gcode('MMU_PRELOAD GATE=1')

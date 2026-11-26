@@ -84,6 +84,8 @@ class MmuSensorRemoveCommand(BaseCommand):
                     # of print state. EndlessSpool's waste-eject path also resets the gate
                     # explicitly, so it needs no special exception here.
                     mmu.gate_maps.set_gate_status(gate, GATE_EMPTY)
+                    # Nor is anything left parked in its bowden (park_at_toolhead)
+                    mmu.set_gate_parked_at_toolhead(gate, False)
 
                 else:
                     mmu.log_assertion(
