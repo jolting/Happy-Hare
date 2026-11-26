@@ -160,6 +160,27 @@ class ParkAtToolheadPreloadTestCase(unittest.TestCase):
         self.assertAlmostEqual(self.fil.tip[2], self.combiner - self.margin, places=1)
         self.assertTrue(self.mmu.gate_parked_at_toolhead[2])
 
+    def test_the_stall_step_follows_the_encoder_resolution(self):
+        """Coarse (5.3mm per pulse, no fractions) feeds 15mm steps; one reading 0.5mm feeds 5mm."""
+        encoder = self.mmu.encoder()
+        for measurable, step in ((5.3, 15.0), (0.53, 5.0), (2.0, 6.0)):
+            encoder.min_measurable = lambda m=measurable: m
+            self.assertAlmostEqual(self.mmu._preload_stall_step(), step)
+        del encoder.min_measurable
+
+    def test_a_fine_encoder_stops_a_stalled_strand_within_a_few_mm(self):
+        self.load_gate(0)
+        self.hh.place_filament(2, position=TIP_AT_GATE)
+        self.mmu.encoder(2).min_measurable = lambda: 0.5
+        self.fil.history.clear()
+
+        self.hh.run_gcode('MMU_PRELOAD GATE=2')
+
+        self.assertEqual(self.hh.errors, [])
+        steps = [d for g, d, r in self.fil.history if g == 2 and d > 0]
+        self.assertTrue(all(abs(d - 5.0) < 1e-6 or d < 5.0 for d in steps), steps)
+        self.assertAlmostEqual(self.fil.tip[2], self.combiner - self.margin, places=1)
+
     def test_no_stall_within_the_feed_limit_is_an_error_not_a_park(self):
         self.load_gate(0)
         self.combiner = 1e9     # nothing in the way

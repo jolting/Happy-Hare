@@ -169,12 +169,22 @@ class MmuFilamentMovement:
         return OCCUPANCY_PRESENT if entry else OCCUPANCY_EMPTY
 
 
-    PRELOAD_STALL_STEP = 15.0   # mm per feed step while watching the encoder for a stall
+    PRELOAD_STALL_STEP = 15.0   # Longest feed step (mm) while watching the encoder for a stall
+    PRELOAD_MIN_STEP = 5.0      # Shortest
     PRELOAD_START_STEPS = 2     # steps without movement before giving up at the start
+
+    def _preload_stall_step(self):
+        """
+        Three times the smallest movement the encoder reliably reports, within
+        PRELOAD_MIN_STEP..PRELOAD_STALL_STEP: an interpolating wheel sees a stall within a few
+        millimetres, a coarse one needs a step long enough to give several pulses.
+        """
+        fine = 3. * self.encoder().min_measurable() if self.has_encoder() else self.PRELOAD_STALL_STEP
+        return min(self.PRELOAD_STALL_STEP, max(self.PRELOAD_MIN_STEP, fine))
 
     def _feed_until_stalled(self, gate, feed_limit, at_stop_ok=False):
         """
-        Feed the selected gate in PRELOAD_STALL_STEP moves until the encoder measures less than
+        Feed the selected gate in _preload_stall_step() moves until the encoder measures less than
         half a step: the strand has stopped against something (on a park_at_toolhead unit, the
         combiner another gate occupies). Returns the distance fed.
 
@@ -184,7 +194,7 @@ class MmuFilamentMovement:
         PRELOAD_START_STEPS steps means it is already at the stop, and that is the stall,
         rather than grinding on.
         """
-        step = self.PRELOAD_STALL_STEP
+        step = self._preload_stall_step()
         fed = 0.
         seen_moving = False
         while fed < feed_limit:
